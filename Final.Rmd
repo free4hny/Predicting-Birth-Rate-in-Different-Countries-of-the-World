@@ -1,0 +1,171 @@
+---
+title: "Info-H 515 Final"
+author: "Abhishek Bhardwaj, Xander Krohannon, Garrett Swearingen"
+date: "4/24/2021"
+output: word_document
+---
+
+```{r}
+set.seed(515)
+
+## Importing data
+countries <- read.csv("~/countries of the world.csv")
+
+## Converting to numeric values
+countries[,3:20] = lapply(countries[,3:20], function(i) as.numeric(gsub(',', '.', i)))
+
+## Dropping rows with NA values
+cleanRows <- rep(FALSE, nrow(countries))
+for (i in 1:nrow(countries)) {
+  if (sum(is.na(countries[i,])) == 0) {cleanRows[i] = TRUE}
+}
+countries <- countries[cleanRows,]
+
+## Removing redundant and unneeded variables
+countries <- countries[,-c(1, 2, 14, 18)]
+```
+
+```{r}
+## Testing normality of variables
+for (i in 1:16) {
+  qqnorm(countries[,i])
+  qqline(countries[,i])
+}
+
+## Spotting outliers
+for (i in 1:16) {
+  boxplot(countries[,i])
+}
+```
+
+# Most of the variables are not normally distributed, so we cannot make the normality assumption for our tests. Many of the variables appear to have quite a bit of skew, but there do not seem to be any outliers that suggest an error in data collection.
+
+
+```{r}
+## Splitting into training and testing
+train = sample(nrow(countries), round(nrow(countries)*2/3))
+countriesTrain <- countries[train,]
+countriesTest <- countries[-train,]
+```
+
+```{r}
+## Function for finding r-squared of test data
+findRsq <- function (testPred, testAct) {
+  sse <- sum((testPred-testAct)^2)
+  sst <- sum((testAct-mean(testAct))^2)
+  return (1 - sse/sst)
+}
+```
+
+```{r}
+## Simple linear model
+countriesLM <- lm(Birthrate ~ ., data = countriesTrain)
+countriesLM_Rsq <- findRsq(predict(countriesLM, countriesTest), countriesTest$Birthrate)
+countriesLM_Rsq
+summary(countriesLM)
+plot(countriesLM)
+
+## Checking for multicollinearity
+library(regclass)
+VIF(countriesLM)
+```
+
+# Overall, the linear model seems like a decent fit. The R-squared value for the test data is 0.728. The error terms seem to be normally distributed (based on the Normal-QQ plot) and independent (based on the Scale-Location plot). There are some relatively high leverage values, however. Also, some of the coefficients were not found to be significant, and a couple had a high VIF (> 5) indicating multicollinearity among the variables. A predictor-reduction regression method such as ridge or LASSO regression might perform better.
+
+```{r}
+## Ridge regression model
+library(glmnet)
+countriesRid <- cv.glmnet(as.matrix(countriesTrain[-13]), countriesTrain$Birthrate, lambda = 10^seq(-2, 8, length = 80), alpha = 0)
+plot(countriesRid)
+countriesRid_Rsq <- findRsq(predict(countriesRid, newx = as.matrix(countriesTest[-13]), s = countriesRid$lambda.min), countriesTest$Birthrate)
+predict(countriesRid, type = "coefficients")
+print(countriesRid$lambda.min)
+countriesRid_Rsq
+```
+
+```{r}
+## LASSO model
+countriesLas <- cv.glmnet(as.matrix(countriesTrain[-13]), countriesTrain$Birthrate, lambda = 10^seq(-2, 8, length = 80), alpha = 1)
+plot(countriesLas)
+countriesLas_Rsq <- findRsq(predict(countriesLas, newx = as.matrix(countriesTest[-13]), s = countriesLas$lambda.min), countriesTest$Birthrate)
+predict(countriesLas, type = "coefficients")
+countriesLas_Rsq
+```
+
+```{r}
+## PLS model
+library(pls)
+countriesPlsr <- plsr(Birthrate ~ ., data = countriesTrain, scale = "TRUE", validation = "CV")
+summary(countriesPlsr)
+countriesPlsr_Rsq <- findRsq(predict(countriesPlsr, newdata = countriesTest, ncomp = 7), countriesTest$Birthrate)
+countriesPlsr_Rsq
+```
+
+```{r}
+## PCR
+countriesPcr <- pcr(Birthrate ~ ., data = countriesTrain, scale = "TRUE", validation = "CV")
+summary(countriesPcr)
+countriesPcr_Rsq <- findRsq(predict(countriesPcr, newdata = countriesTest, ncomp = 7), countriesTest$Birthrate)
+countriesPcr_Rsq
+```
+
+# The partial least squares model had the highest test R-squared (0.808), followed by PCR, LASSO, and finally ridge regression. The PLS and PCR models performed best at 7 components and LASSO performed best at 5 predictors (based on cross-validation). We may also try subset selection to reduce parameters.
+
+```{r}
+## Subset selection
+library(leaps)
+sel = summary(regsubsets(Birthrate ~ ., data = countriesTrain, method = "exhaustive", nv = 15))
+plot(sel$adjr2) + points(which.max(sel$adjr2), sel$adjr2[which.max(sel$adjr2)], col = "red")
+plot(sel$cp) + points(which.min(sel$cp), sel$cp[which.min(sel$cp)], col = "red")
+plot(sel$bic) + points(which.min(sel$bic), sel$bic[which.min(sel$bic)], col = "red")
+```
+
+# The adjusted r-squared is maximized at 11 predictors, Mallow's Cp is minimized at 10 predictors, and BIC is minimized at 8 predictors. 10 predictors seems to be a reasonable number of predictors based on these metrics.
+
+```{r}
+## Linear regression with predictors chosen from subset selection
+coef(sel$obj, 10)
+countriesSub <- lm(Birthrate ~ Population + Area..sq..mi.. + Pop..Density..per.sq..mi.. + Infant.mortality..per.1000.births. + GDP....per.capita. + Literacy.... + Phones..per.1000. + Crops.... + Climate + Industry, data = countriesTrain)
+countriesSub_Rsq <- findRsq(predict(countriesSub, newdata = countriesTest), countriesTest$Birthrate)
+countriesSub_Rsq
+```
+
+# Linear regression with subset selection did not improve the test error of the model.
+
+```{r}
+## Decision trees with pruning
+set.seed(515)
+library(tree)
+
+brTree <- tree(Birthrate ~ ., data = countriesTrain)
+
+plot(brTree); text(brTree, pretty = 0, cex = 0.6)
+
+cv.tree(brTree)    #Error minimized at size 4
+brPrune <- prune.tree(brTree, best = 4)
+
+findRsq(predict(brTree, newdata = countriesTest), countriesTest$Birthrate)
+findRsq(predict(brPrune, newdata = countriesTest), countriesTest$Birthrate)
+
+plot(brPrune); text(brPrune, pretty = 0, cex = 0.8)    #Pruned decision tree
+```
+
+#Pruning with cross-validation improved the test R-squared of the decision tree from 0.759 to 0.792.
+
+```{r}
+## Boosting, bagging, and random forest
+library(randomForest)
+library(gbm)
+
+brBoost <- gbm(Birthrate ~ ., data = countriesTrain, distribution = "gaussian")
+brBag <- randomForest(Birthrate ~ ., data = countriesTrain, ntry = ncol(countriesTrain), importance = TRUE)
+brRF <- randomForest(Birthrate ~ ., data = countriesTrain, importance = TRUE)
+
+findRsq(predict(brBoost, newdata = countriesTest), countriesTest$Birthrate)
+findRsq(predict(brBag, newdata = countriesTest), countriesTest$Birthrate)
+findRsq(predict(brRF, newdata = countriesTest), countriesTest$Birthrate)
+
+brBag$importance
+brRF$importance
+```
+
